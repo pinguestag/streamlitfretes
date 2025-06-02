@@ -382,5 +382,3 @@ if submit_button_form:
                         else: st.text(msg)
                 else:
                     st.caption("Nenhuma mensagem de log do ORS.")
-            elif not ORS_CLIENT_VALID:
-                st.error("Cálculo não pode prosseguir: Cliente OpenRouteService não está operacional.")
