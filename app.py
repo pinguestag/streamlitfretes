@@ -287,7 +287,7 @@ if submit_button_form:
 
                 # Exibe os componentes ANTT usados no cálculo final (já mostrados reativamente, mas bom confirmar)
                 st.markdown("#### 📜 Componentes ANTT Utilizados no Cálculo Final")
-                st.info(f"**Normativo:** {normativo_final} | **R$/km Base:** {coef_desloc_antt:.3f} | **C/D Fixo:** R$ {valor_fixo_cd_antt:.2f}")
+                st.info(f"**Normativo:** {normativo_final} | "
 
                 if distancia is not None and distancia > 0:
                     custo_deslocamento_antt = coef_desloc_antt * distancia
