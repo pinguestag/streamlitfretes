@@ -55,7 +55,7 @@ tabela_antt = {
 @st.cache_data # Cache para evitar recálculos desnecessários da taxa ANTT para a mesma data
 def encontrar_frete_vigente(tabela, data_requisicao_str):
     try:
-        data_req_obj = datetime.strptime(data_requisicao_str, '%dd/%mm/%YYYY')
+        data_req_obj = datetime.strptime(data_requisicao_str, '%d/%m/%Y')
     except ValueError:
         return None, None, None
     entradas_ordenadas = []
