@@ -92,6 +92,8 @@ def encontrar_frete_vigente(tabela, data_requisicao_str):
                 break
     return normativo_aplicavel, frete_aplicavel, data_req_obj
 
+# No seu app.py, substitua as funções ORS existentes por estas:
+
 def obter_coordenadas_ors(nome_lugar, client_ors_func):
     global ORS_CLIENT_VALID
     if not ORS_CLIENT_VALID or not client_ors_func:
@@ -104,17 +106,22 @@ def obter_coordenadas_ors(nome_lugar, client_ors_func):
             st.session_state.ors_log.append(f"✔️ Coordenadas para '{nome_lugar}': {coordenadas}")
             return coordenadas
         else:
-            st.session_state.ors_log.append(f"⚠️ ORS: Não encontrou coordenadas para '{nome_lugar}'.")
+            st.session_state.ors_log.append(f"⚠️ ORS: Não encontrou coordenadas para '{nome_lugar}'. Resposta: {geocode_result}")
             return None
-    except ors_exceptions.RateLimitExceeded as rle: # Tratamento específico para limite de taxa
-        st.session_state.ors_log.append(f"❌ ORS API Error (geocoding '{nome_lugar}'): Limite de taxa excedido. {rle}")
-        ORS_CLIENT_VALID = False 
-        st.error("ORS: Limite de requisições da API atingido. Tente novamente mais tarde.")
-        return None
     except ors_exceptions.ApiError as e:
-        st.session_state.ors_log.append(f"❌ ORS API Error (geocoding '{nome_lugar}'): {e}")
+        http_status = getattr(e, 'http_status', None) or getattr(e, 'status_code', None)
+        if hasattr(e, 'args') and len(e.args) > 0 and isinstance(e.args[0], int) and not http_status:
+             http_status = e.args[0]
+
+        st.session_state.ors_log.append(f"❌ ORS API Error (geocoding '{nome_lugar}'): HTTP {http_status if http_status else 'N/A'} - {e}")
+        if http_status == 429: # HTTP 429: Too Many Requests (Rate Limit)
+            st.session_state.ors_log.append("➡️ Causa provável: Limite de taxa da API ORS excedido.")
+            ORS_CLIENT_VALID = False 
+            st.error("ORS: Limite de requisições da API atingido. Tente novamente mais tarde. A funcionalidade de distância foi desabilitada para esta sessão.")
+        elif hasattr(e, 'response') and e.response is not None:
+            st.session_state.ors_log.append(f"Detalhes da API: {e.response.text}")
         return None
-    except Exception as e:
+    except Exception as e: # Outros erros inesperados
         st.session_state.ors_log.append(f"❌ ORS Unexpected Error (geocoding '{nome_lugar}'): {e}")
         return None
 
@@ -124,10 +131,11 @@ def calcular_rota_e_distancia_ors(nome_origem_str, nome_destino_str, client_ors_
     
     if not ORS_CLIENT_VALID or not client_ors_func:
         st.session_state.ors_log.append("⚠️ ORS: Cliente não válido para cálculo de rota.")
-        return None, None, None, None # distancia, coords_o, coords_d, route_geometry
+        return None, None, None, None 
 
     coords_origem = obter_coordenadas_ors(nome_origem_str, client_ors_func)
-    if not ORS_CLIENT_VALID: return None, coords_origem, None, None
+    # Se obter_coordenadas_ors desabilitou ORS_CLIENT_VALID devido a rate limit, paramos aqui
+    if not ORS_CLIENT_VALID: return None, coords_origem, None, None 
 
     coords_destino = obter_coordenadas_ors(nome_destino_str, client_ors_func)
     if not ORS_CLIENT_VALID: return None, coords_origem, coords_destino, None
@@ -137,33 +145,37 @@ def calcular_rota_e_distancia_ors(nome_origem_str, nome_destino_str, client_ors_
             st.session_state.ors_log.append(f" Tentando obter rota entre {coords_origem} e {coords_destino}...")
             rota_result = client_ors_func.directions(
                 coordinates=[coords_origem, coords_destino],
-                profile="driving-car", format="geojson", geometry="true" # Solicita a geometria
+                profile="driving-car", format="geojson", geometry="true"
             )
             if rota_result and rota_result.get('features'):
                 feature = rota_result['features'][0]
                 distancia_metros = feature['properties']['segments'][0]['distance']
                 distancia_km = distancia_metros / 1000
-                route_geometry = feature['geometry']['coordinates'] # Lista de [lon, lat]
+                route_geometry = feature['geometry']['coordinates']
                 st.session_state.ors_log.append(f"✔️ ORS: Distância: {distancia_km:.2f} km. Geometria da rota obtida.")
                 return distancia_km, coords_origem, coords_destino, route_geometry
             else:
-                st.session_state.ors_log.append(f"❌ ORS Error: Resposta da rota inesperada ou vazia.")
+                st.session_state.ors_log.append(f"❌ ORS Error: Resposta da rota inesperada ou vazia. {rota_result}")
                 return None, coords_origem, coords_destino, None
-        except ors_exceptions.RateLimitExceeded as rle:
-            st.session_state.ors_log.append(f"❌ ORS API Error (routing): Limite de taxa excedido. {rle}")
-            ORS_CLIENT_VALID = False
-            st.error("ORS: Limite de requisições da API atingido. Tente novamente mais tarde.")
-            return None, coords_origem, coords_destino, None
         except ors_exceptions.ApiError as e:
-            st.session_state.ors_log.append(f"❌ ORS API Error (routing): {e}")
-            if hasattr(e, 'response') and e.response is not None:
-                 st.session_state.ors_log.append(f"Detalhes: {e.response.text}")
+            http_status = getattr(e, 'http_status', None) or getattr(e, 'status_code', None)
+            if hasattr(e, 'args') and len(e.args) > 0 and isinstance(e.args[0], int) and not http_status:
+                http_status = e.args[0]
+
+            st.session_state.ors_log.append(f"❌ ORS API Error (routing): HTTP {http_status if http_status else 'N/A'} - {e}")
+            if http_status == 429: # HTTP 429: Too Many Requests (Rate Limit)
+                st.session_state.ors_log.append("➡️ Causa provável: Limite de taxa da API ORS excedido.")
+                ORS_CLIENT_VALID = False
+                st.error("ORS: Limite de requisições da API atingido. Tente novamente mais tarde. A funcionalidade de distância foi desabilitada para esta sessão.")
+            elif hasattr(e, 'response') and e.response is not None:
+                 st.session_state.ors_log.append(f"Detalhes da API: {e.response.text}")
             return None, coords_origem, coords_destino, None
         except (KeyError, IndexError, TypeError) as e:
             st.session_state.ors_log.append(f"❌ ORS Error (processando resposta da rota): {e}")
+            st.session_state.ors_log.append(f"Resposta da API (rota): {rota_result if 'rota_result' in locals() else 'Não disponível'}")
             return None, coords_origem, coords_destino, None
     else:
-        st.session_state.ors_log.append("⚠️ ORS: Rota não calculada (origem ou destino não geocodificado).")
+        st.session_state.ors_log.append("⚠️ ORS: Rota não calculada (coordenadas de origem ou destino não encontradas).")
         return None, coords_origem, coords_destino, None
 # ----- FIM DAS DEFINIÇÕES DE DADOS E FUNÇÕES -----
 
