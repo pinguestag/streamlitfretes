@@ -4,26 +4,27 @@ import openrouteservice
 from openrouteservice import exceptions as ors_exceptions
 import pandas as pd
 
-# Tenta importar Pydeck
+# Tenta importar Pydeck e define 'pdk'
 try:
     import pydeck as pdk
     PYDECK_AVAILABLE = True
 except ImportError:
     PYDECK_AVAILABLE = False
-    pdk = None 
+    pdk = None
 
 # ----- CONFIGURAÇÃO DO CLIENTE OPENROUTESERVICE -----
-ORS_API_KEY = st.secrets.get("ORS_API_KEY", None) # Pega dos secrets do Streamlit Cloud
+ORS_API_KEY = st.secrets.get("ORS_API_KEY", None)
 ORS_CLIENT_VALID = False
-ors_client = None 
+ors_client = None
+
 if ORS_API_KEY:
     try:
         ors_client = openrouteservice.Client(key=ORS_API_KEY)
         ORS_CLIENT_VALID = True
     except Exception as e:
-        # Aviso será mostrado no corpo do app se a inicialização falhar
-        pass 
-# ----- FIM DA CONFIGURAÇÃO ORS -----
+        ORS_CLIENT_VALID = False
+else:
+    pass
 
 # ----- INÍCIO DAS DEFINIÇÕES DE DADOS E FUNÇÕES -----
 tabela_antt = {
@@ -52,7 +53,6 @@ tabela_antt = {
     'RESOLUÇÃO Nº 5.890, DE 26 DE MAIO DE 2020': [4.423, 413.790, '26/05/2020']
 }
 
-@st.cache_data # Cache para evitar recálculos desnecessários da taxa ANTT para a mesma data
 def encontrar_frete_vigente(tabela, data_requisicao_str):
     try:
         data_req_obj = datetime.strptime(data_requisicao_str, '%d/%m/%Y')
@@ -66,7 +66,7 @@ def encontrar_frete_vigente(tabela, data_requisicao_str):
             entradas_ordenadas.append((data_normativo_obj, normativo, [valores[0], valores[1]]))
         except ValueError:
             continue
-    if not entradas_ordenadas: 
+    if not entradas_ordenadas:
         return None, None, data_req_obj
     entradas_ordenadas.sort(key=lambda item: item[0])
     frete_aplicavel = None
@@ -91,49 +91,41 @@ def obter_coordenadas_ors(nome_lugar, client_ors_func):
         geocode_result = client_ors_func.pelias_search(text=nome_lugar, size=1)
         if geocode_result and geocode_result.get('features'):
             coordenadas = geocode_result['features'][0]['geometry']['coordinates']
-            st.session_state.ors_log.append(f"✔️ Coordenadas para '{nome_lugar}': {coordenadas}")
+            st.session_state.ors_log.append(f"✅ Coordenadas para '{nome_lugar}': {coordenadas}")
             return coordenadas
         else:
             st.session_state.ors_log.append(f"⚠️ ORS: Não encontrou coordenadas para '{nome_lugar}'.")
             return None
+    except ors_exceptions.RateLimitExceeded as rle:
+        st.session_state.ors_log.append(f"❌ ORS API Error (geocoding '{nome_lugar}'): Limite de taxa excedido. {rle}")
+        ORS_CLIENT_VALID = False
+        st.error("ORS: Limite de requisições da API atingido. Tente novamente mais tarde.")
+        return None
     except ors_exceptions.ApiError as e:
-        http_status = getattr(e, 'http_status', None) or getattr(e, 'status_code', None)
-        st.session_state.ors_log.append(f"❌ ORS API Error (geocoding '{nome_lugar}'): HTTP {http_status if http_status else 'N/A'} - {e}")
-        if http_status == 429:
-            st.session_state.ors_log.append("➡️ Causa: Limite de taxa da API ORS excedido.")
-            ORS_CLIENT_VALID = False 
-            st.error("ORS: Limite de requisições da API atingido. Distância desabilitada nesta sessão.")
+        st.session_state.ors_log.append(f"❌ ORS API Error (geocoding '{nome_lugar}'): {e}")
         return None
     except Exception as e:
         st.session_state.ors_log.append(f"❌ ORS Unexpected Error (geocoding '{nome_lugar}'): {e}")
         return None
 
-@st.cache_data(show_spinner=False) # Cache para a rota completa
-def calcular_rota_e_distancia_ors_cached(_client_repr, nome_origem_str, nome_destino_str):
-    # _client_repr é uma representação simples do cliente para o cache, como a chave API
-    # O cliente real (ors_client) será usado dentro se for válido
-    global ORS_CLIENT_VALID, ors_client # Necessário para modificar ORS_CLIENT_VALID
-    
-    # Reinicializa o log para esta chamada em cache
-    # Usar st.session_state aqui dentro de função cacheada pode ser problemático para logs
-    # O log será gerenciado fora e passado para exibição
-    temp_ors_log = [f"Iniciando cálculo de rota ORS (cacheado): '{nome_origem_str}' -> '{nome_destino_str}'"]
-    
-    if not ORS_CLIENT_VALID or not ors_client:
-        temp_ors_log.append("⚠️ ORS: Cliente não válido para cálculo de rota.")
-        return None, None, None, None, temp_ors_log
+def calcular_rota_e_distancia_ors(nome_origem_str, nome_destino_str, client_ors_func):
+    global ORS_CLIENT_VALID
+    st.session_state.ors_log = [f"Iniciando cálculo de rota ORS: '{nome_origem_str}' -> '{nome_destino_str}'"]
 
-    coords_origem = obter_coordenadas_ors(nome_origem_str, ors_client) # Usa o ors_client global
-    if not ORS_CLIENT_VALID: return None, coords_origem, None, None, st.session_state.ors_log # Retorna log atualizado
-    
-    coords_destino = obter_coordenadas_ors(nome_destino_str, ors_client)
-    if not ORS_CLIENT_VALID: return None, coords_origem, coords_destino, None, st.session_state.ors_log
+    if not ORS_CLIENT_VALID or not client_ors_func:
+        st.session_state.ors_log.append("⚠️ ORS: Cliente não válido para cálculo de rota.")
+        return None, None, None, None
+
+    coords_origem = obter_coordenadas_ors(nome_origem_str, client_ors_func)
+    if not ORS_CLIENT_VALID: return None, coords_origem, None, None
+
+    coords_destino = obter_coordenadas_ors(nome_destino_str, client_ors_func)
+    if not ORS_CLIENT_VALID: return None, coords_origem, coords_destino, None
 
     if coords_origem and coords_destino:
         try:
-            temp_ors_log.append(f" Tentando obter rota entre {coords_origem} e {coords_destino}...")
-            # Usa o ors_client global
-            rota_result = ors_client.directions(
+            st.session_state.ors_log.append(f" Tentando obter rota entre {coords_origem} e {coords_destino}...")
+            rota_result = client_ors_func.directions(
                 coordinates=[coords_origem, coords_destino],
                 profile="driving-car", format="geojson", geometry="true"
             )
@@ -141,244 +133,254 @@ def calcular_rota_e_distancia_ors_cached(_client_repr, nome_origem_str, nome_des
                 feature = rota_result['features'][0]
                 distancia_metros = feature['properties']['segments'][0]['distance']
                 distancia_km = distancia_metros / 1000
-                route_geometry = feature['geometry']['coordinates'] 
-                temp_ors_log.append(f"✔️ ORS: Distância: {distancia_km:.2f} km. Geometria da rota obtida.")
-                # Atualiza o log principal da sessão com os logs desta função cacheada
-                st.session_state.ors_log.extend(temp_ors_log)
+                route_geometry = feature['geometry']['coordinates']
+                st.session_state.ors_log.append(f"✅ ORS: Distância: {distancia_km:.2f} km. Geometria da rota obtida.")
                 return distancia_km, coords_origem, coords_destino, route_geometry
             else:
-                temp_ors_log.append(f"❌ ORS Error: Resposta da rota inesperada ou vazia.")
-                st.session_state.ors_log.extend(temp_ors_log)
+                st.session_state.ors_log.append(f"❌ ORS Error: Resposta da rota inesperada ou vazia.")
                 return None, coords_origem, coords_destino, None
-        except ors_exceptions.ApiError as e:
-            http_status = getattr(e, 'http_status', None) or getattr(e, 'status_code', None)
-            temp_ors_log.append(f"❌ ORS API Error (routing): HTTP {http_status if http_status else 'N/A'} - {e}")
-            if http_status == 429:
-                temp_ors_log.append("➡️ Causa: Limite de taxa da API ORS excedido.")
-                ORS_CLIENT_VALID = False
-                st.error("ORS: Limite de requisições da API atingido. Distância desabilitada.")
-            st.session_state.ors_log.extend(temp_ors_log)
+        except ors_exceptions.RateLimitExceeded as rle:
+            st.session_state.ors_log.append(f"❌ ORS API Error (routing): Limite de taxa excedido. {rle}")
+            ORS_CLIENT_VALID = False
+            st.error("ORS: Limite de requisições da API atingido. Tente novamente mais tarde.")
             return None, coords_origem, coords_destino, None
-        except Exception as e:
-            temp_ors_log.append(f"❌ ORS Error (processando resposta da rota): {e}")
-            st.session_state.ors_log.extend(temp_ors_log)
+        except ors_exceptions.ApiError as e:
+            st.session_state.ors_log.append(f"❌ ORS API Error (routing): {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                 st.session_state.ors_log.append(f"Detalhes: {e.response.text}")
+            return None, coords_origem, coords_destino, None
+        except (KeyError, IndexError, TypeError) as e:
+            st.session_state.ors_log.append(f"❌ ORS Error (processando resposta da rota): {e}")
             return None, coords_origem, coords_destino, None
     else:
-        temp_ors_log.append("⚠️ ORS: Rota não calculada (origem ou destino não geocodificado).")
-        st.session_state.ors_log.extend(temp_ors_log)
+        st.session_state.ors_log.append("⚠️ ORS: Rota não calculada (origem ou destino não geocodificado).")
         return None, coords_origem, coords_destino, None
 # ----- FIM DAS DEFINIÇÕES DE DADOS E FUNÇÕES -----
 
 st.set_page_config(layout="wide", page_title="Calculadora de Frete ANTT")
 st.title("Cálculo de Frete ANTT e Distância 🚚")
-st.markdown("Insira os dados para consultar o frete e a distância.")
 
-if not ORS_CLIENT_VALID and ORS_API_KEY and ORS_API_KEY != "SUA_CHAVE_API_AQUI": # Avisa se o cliente falhou mas uma chave foi provida
-    st.error("Cliente OpenRouteService não pôde ser inicializado. Verifique sua chave API ORS nos Secrets ou os logs para erros de limite de taxa. Funcionalidade de distância e mapa estarão desabilitadas.")
-elif not ORS_API_KEY or ORS_API_KEY == "SUA_CHAVE_API_AQUI":
-     st.warning("Chave da API OpenRouteService (ORS_API_KEY) não configurada nos secrets do Streamlit Cloud. A funcionalidade de cálculo de distância via ORS e o mapa estarão desabilitados.")
-
+if not ORS_CLIENT_VALID:
+    st.error("Cliente OpenRouteService não inicializado ou chave API inválida/não configurada. Funcionalidade de distância e mapa estarão desabilitadas.")
 
 if 'ors_log' not in st.session_state: st.session_state.ors_log = []
-if 'map_data' not in st.session_state: 
-    st.session_state.map_data = {'points_df': None, 'route_df': None}
+if 'map_data' not in st.session_state:
+    st.session_state.map_data = {'points': None, 'route': None}
 
-# --- Inputs do Usuário ---
-data_selecionada_dt_widget = st.date_input(
-    "🗓️ Data da requisição:", 
-    datetime.now(), 
-    help="Selecione a data para o cálculo dos componentes ANTT."
-)
-if data_selecionada_dt_widget:
-    data_para_calculo_antt_str = data_selecionada_dt_widget.strftime('%d/%m/%Y')
-    st.caption(f"Formato para componentes ANTT: **{data_para_calculo_antt_str}**")
-else:
-    data_para_calculo_antt_str = datetime.now().strftime('%d/%m/%Y') # Fallback
+with st.form(key="input_form"):
+    st.markdown("##### 🗓️ Data e 🗺️ Localidades")
+    col_data, col_origem, col_destino = st.columns(3)
+    with col_data:
+        data_selecionada_dt = st.date_input("Data da requisição:", datetime.now(), help="Selecione a data para o cálculo.")
+        if data_selecionada_dt:
+             st.caption(f"Formato para cálculo: **{data_selecionada_dt.strftime('%d/%m/%Y')}**")
+    with col_origem:
+        origem_nome_input = st.text_input("Local de Origem:", value="Fortaleza, CE, Brasil", help="Ex: Fortaleza, CE ou Praça do Ferreira, Fortaleza")
+    with col_destino:
+        destino_nome_input = st.text_input("Local de Destino:", value="São Paulo, SP, Brasil", help="Ex: São Paulo, SP ou Parque Ibirapuera, São Paulo")
 
-
-# --- Exibição Reativa dos Componentes ANTT Base ---
-if data_para_calculo_antt_str:
-    normativo_reativo, frete_componentes_reativo, data_obj_reativo = encontrar_frete_vigente(tabela_antt, data_para_calculo_antt_str)
-    
     st.markdown("---")
-    st.markdown("##### 📜 Componentes Base (ANTT) para a Data Selecionada:")
-    if data_obj_reativo is None: # Checa se parse da data falhou em encontrar_frete_vigente
-        st.warning("Formato de data inválido para buscar taxas ANTT.")
-    elif normativo_reativo and frete_componentes_reativo:
-        coef_desloc_antt_reativo = frete_componentes_reativo[0]
-        valor_fixo_cd_antt_reativo = frete_componentes_reativo[1]
-        st.info(f"**Normativo ANTT Aplicável:** {normativo_reativo}")
-        r_col1, r_col2 = st.columns(2)
-        r_col1.metric("R$ / km (Base ANTT)", f"{coef_desloc_antt_reativo:.3f}")
-        r_col2.metric("Valor Fixo Carga/Descarga (ANTT)", f"R$ {valor_fixo_cd_antt_reativo:.2f}")
-    else:
-        st.warning(f"Nenhuma taxa ANTT encontrada para a data: {data_para_calculo_antt_str}")
-    st.markdown("---")
-
-# --- Formulário para o restante dos inputs e cálculo principal ---
-with st.form(key="main_calculation_form"):
-    st.markdown("##### 🌍 Localidades (para cálculo de distância via ORS)")
-    origem_form = st.text_input("Local de Origem:", value="Fortaleza, CE, Brasil")
-    destino_form = st.text_input("Local de Destino:", value="São Paulo, SP, Brasil")
-
     st.markdown("##### 💰 Adicionais Personalizados")
-    col_adic1_form, col_adic2_form = st.columns(2)
-    with col_adic1_form:
-        valor_dificuldade_form = st.number_input("Valor por Dificuldade (R$):", 
-                                            min_value=0.0, value=0.0, format="%.2f")
-    with col_adic2_form:
-        adicional_desloc_taxa_form = st.number_input("Adicional por deslocamento (R$/km):", 
-                                                      min_value=0.0, value=0.0, format="%.3f")
-    
-    submit_button_form = st.form_submit_button("Calcular Rota e Frete Completo 🧮", disabled=not ORS_CLIENT_VALID)
+    # CORREÇÃO: Mova a definição das colunas para dentro do formulário
+    col_adic1, col_adic2, col_adic3 = st.columns(3)
+    with col_adic1:
+        valor_dificuldade_input = st.number_input("Valor por Dificuldade (R$):",
+                                            min_value=0.0, value=0.0, format="%.2f",
+                                            help="Valor fixo somado devido a dificuldades na rota/operação.")
+    with col_adic2:
+        adicional_deslocamento_taxa_input = st.number_input("Adicional por deslocamento (R$/km):",
+                                                      min_value=0.0, value=0.0, format="%.3f",
+                                                      help="Taxa extra por km multiplicada pela distância.")
+    with col_adic3:
+        # Renomeei para maior clareza, pois é o INPUT de peso.
+        peso_mercadoria_kg_input = st.number_input("Peso da Mercadoria (KG):",
+                                                       min_value=0.0, value=0.0, format="%.2f",
+                                                       help="Peso da Mercadoria na Viagem em quilogramas.")
+    st.markdown("---")
+    submit_button = st.form_submit_button("Calcular Frete e Distância ⚙️", disabled=not ORS_CLIENT_VALID)
 
-if submit_button_form:
-    # Usa a data já formatada e os componentes ANTT reativos para o cálculo final
-    data_final_str = data_para_calculo_antt_str 
-    normativo_final, frete_comp_final, data_obj_final = normativo_reativo, frete_componentes_reativo, data_obj_reativo
+if submit_button:
+    data_usuario_str = data_selecionada_dt.strftime('%d/%m/%Y')
+    valid_input = True
+    if not origem_nome_input.strip() or not destino_nome_input.strip():
+        st.error("Por favor, preencha os nomes dos locais de origem e destino.")
+        valid_input = False
 
-    if not origem_form.strip() or not destino_form.strip():
-        st.error("Por favor, preencha os nomes dos locais de origem e destino no formulário.")
-    elif not ORS_CLIENT_VALID:
-        st.error("Cliente ORS não está válido. Verifique a chave API ou mensagens de erro.")
-    else:
-        with st.spinner("Calculando rota e frete completo... ⏳"):
-            # Passa uma string simples para o cache para representar o cliente ORS
-            # já que o objeto cliente em si não é diretamente hasheável pelo st.cache_data
-            # A função cacheada usará o cliente global 'ors_client'
-            client_repr_for_cache = ORS_API_KEY if ORS_API_KEY else "no_key"
-            
-            # Limpa o log da sessão ANTES de chamar a função que irá popular ele
-            st.session_state.ors_log = [] 
-            
-            distancia, coords_o, coords_d, route_geom = calcular_rota_e_distancia_ors_cached(
-                client_repr_for_cache, origem_form, destino_form
-            )
-            
+    if valid_input and ORS_CLIENT_VALID:
+        with st.spinner("Calculando distância via ORS e frete... ⏳"):
+            distancia, coords_o, coords_d, route_geom = calcular_rota_e_distancia_ors(origem_nome_input, destino_nome_input, ors_client)
+
+            # Prepara dados para o mapa
             map_points_list = []
             if coords_o: map_points_list.append({'latitude': coords_o[1], 'longitude': coords_o[0], 'tipo': 'Origem', 'cor': [200, 30, 0, 200]})
             if coords_d: map_points_list.append({'latitude': coords_d[1], 'longitude': coords_d[0], 'tipo': 'Destino', 'cor': [0, 0, 255, 200]})
-            
-            st.session_state.map_data['points_df'] = pd.DataFrame(map_points_list) if map_points_list else None
-            st.session_state.map_data['route_df'] = [{"path": route_geom, "name": f"Rota: {origem_form} para {destino_form}"}] if route_geom else None
 
-            # Exibição dos Resultados
-            st.markdown("---") 
-            st.subheader("📊 RESULTADOS DO CÁLCULO FINAL")
-            # ... (exibição das informações de data, origem, destino e distância como antes)
+            st.session_state.map_data['points'] = pd.DataFrame(map_points_list) if map_points_list else None
+            st.session_state.map_data['route'] = [{"path": route_geom, "name": "Rota Calculada"}] if route_geom else None
+
+            normativo, frete_componentes, data_obj = encontrar_frete_vigente(tabela_antt, data_usuario_str)
+
+            st.markdown("---")
+            st.subheader("📊 RESULTADOS DO CÁLCULO")
+
+            # Informações básicas
             res_col1, res_col2 = st.columns(2)
             with res_col1:
-                st.markdown(f"**Data da Requisição:** `{data_final_str}`")
-                st.markdown(f"**Origem Informada:** `{origem_form}`")
+                st.markdown(f"**Data da Requisição:** `{data_usuario_str}`")
+                st.markdown(f"**Origem Informada:** `{origem_nome_input}`")
             with res_col2:
-                st.markdown(f"**Destino Informado:** `{destino_form}`")
+                st.markdown(f"**Destino Informado:** `{destino_nome_input}`")
                 if distancia is not None:
                     st.metric(label="Distância Calculada (ORS)", value=f"{distancia:.2f} km")
                 else:
                     st.error("Distância não pôde ser calculada via ORS.")
             st.markdown("---")
 
+            # Cálculo e exibição do frete
+            if data_obj is None:
+                st.error("ERRO: Formato de data inválido para a requisição.")
+            elif normativo and frete_componentes:
+                coef_desloc_antt = frete_componentes[0]
+                valor_fixo_cd_antt = frete_componentes[1]
 
-            if data_obj_final is None:
-                st.error("ERRO: Formato de data inválido na data submetida.")
-            elif normativo_final and frete_comp_final:
-                coef_desloc_antt = frete_comp_final[0]
-                valor_fixo_cd_antt = frete_comp_final[1]
-
-                # Exibe os componentes ANTT usados no cálculo final (já mostrados reativamente, mas bom confirmar)
-                st.markdown("#### 📜 Componentes ANTT Utilizados no Cálculo Final")
-                st.info(f"**Normativo:** {normativo_final} | ")
+                st.markdown("#### 📝 Componentes do Frete Base (ANTT)")
+                st.info(f"**Normativo Aplicável:** {normativo}")
+                f_col1, f_col2 = st.columns(2)
+                f_col1.metric("R$ / km (Base ANTT)", f"{coef_desloc_antt:.3f}")
+                f_col2.metric("Valor Fixo Carga/Descarga (ANTT)", f"R$ {valor_fixo_cd_antt:.2f}")
 
                 if distancia is not None and distancia > 0:
                     custo_deslocamento_antt = coef_desloc_antt * distancia
-                    custo_adicional_desloc = adicional_desloc_taxa_form * distancia
-                    frete_total_calculado = (custo_deslocamento_antt + valor_fixo_cd_antt + 
-                                             custo_adicional_desloc + valor_dificuldade_form)
+                    custo_adicional_desloc = adicional_deslocamento_taxa_input * distancia
+
+                    # CÁLCULO DO FRETE TOTAL ANTES DE CALCULAR O PESO TRANSPORTADO PARA TER A TARIFA CORRETA
+                    frete_total_calculado = (custo_deslocamento_antt + valor_fixo_cd_antt +
+                                             custo_adicional_desloc + valor_dificuldade_input)
+
+                    # CORREÇÃO: Aplicando a sua fórmula exata para peso_transportado_calculado
+                    # Certifique-se de que o 23520 e a unidade do peso_mercadoria_kg_input (KG)
+                    # fazem sentido no contexto da sua fórmula.
+                    # Se 'tarifa' é frete_total_calculado, então:
+                    if peso_mercadoria_kg_input > 0 and distancia > 0: # Evita divisão por zero ou resultados sem sentido
+                        peso_transportado_calculado = (peso_mercadoria_kg_input * distancia * coef_desloc_antt) / 23520
+                    else:
+                        peso_transportado_calculado = 0.0 # Define como 0 se não houver peso ou distância
+
                     frete_real_por_km = frete_total_calculado / distancia
                     delta_vs_base = frete_real_por_km - coef_desloc_antt
-                    percent_change = (delta_vs_base / coef_desloc_antt * 100) if coef_desloc_antt != 0 else 0
-                    
-                    delta_color = "off" 
-                    arrow = "➖" # Neutro
-                    if delta_vs_base > 0.001: delta_color = "normal"; arrow = "⬆️"
-                    elif delta_vs_base < -0.001: delta_color = "inverse"; arrow = "⬇️"
+                    percent_change = (delta_vs_base / coef_desloc_antt * 100) if coef_desloc_antt > 0 else 0
 
-                    st.markdown("#### 💰 Detalhamento dos Custos do Frete")
-                    det_cols = st.columns(4) # Origem ANTT, Adic. Desloc, Dificuldade, C/D ANTT
+                    delta_color = "off"
+                    arrow = "▬"
+                    if delta_vs_base > 0.001:
+                        delta_color = "normal"
+                        arrow = "⬆️"
+                    elif delta_vs_base < -0.001:
+                        delta_color = "inverse"
+                        arrow = "⬇️"
+
+                    st.markdown("#### 💰 Cálculos de Frete Detalhados")
+                    det_cols = st.columns(4)
                     det_cols[0].metric("Custo Desloc. (ANTT)", f"R$ {custo_deslocamento_antt:.2f}")
-                    det_cols[1].metric("Custo Adic. Desloc.", f"R$ {custo_adicional_desloc:.2f}", help=f"{adicional_desloc_taxa_form:.3f} R$/km")
-                    det_cols[2].metric("Valor por Dificuldade", f"R$ {valor_dificuldade_form:.2f}")
-                    det_cols[3].metric("Carga/Descarga (ANTT)", f"R$ {valor_fixo_cd_antt:.2f}")
-                                    
+                    det_cols[1].metric("Custo Adic. Desloc.", f"R$ {custo_adicional_desloc:.2f}", help=f"{adicional_deslocamento_taxa_input:.3f} R$/km * {distancia:.2f} km")
+                    det_cols[2].metric("Valor por Dificuldade", f"R$ {valor_dificuldade_input:.2f}")
+
                     st.markdown("---")
-                    st.subheader("🏁 Estimativas Finais do Frete")
-                    final_col1, final_col2 = st.columns(2)
+                    st.subheader("Estimativas Finais do Frete:")
+                    # CORREÇÃO: Crie 3 colunas para os resultados finais
+                    final_col1, final_col2, final_col3 = st.columns(3)
                     final_col1.metric("Valor Total Final Estimado", f"R$ {frete_total_calculado:.2f}")
-                    final_col2.metric(label=f"Frete Real (R$/km Total) {arrow}", 
+                    final_col2.metric(label=f"Frete Real (R$/km Total) {arrow}",
                                       value=f"R$ {frete_real_por_km:.3f}",
-                                      delta=f"{percent_change:.1f}% vs Base ANTT", 
+                                      delta=f"{percent_change:.1f}% vs Base ANTT",
                                       delta_color=delta_color)
+                    # CORREÇÃO: Exibindo o resultado da sua fórmula
+                    final_col3.metric(label="Peso Transportado Calculado (KG)",
+                                      value=f"{peso_transportado_calculado:.2f} (KG)") # Adicionado o value
+
                 elif distancia == 0:
-                    st.warning("Distância é 0 km. Calculando apenas custos fixos.")
-                    custos_fixos_total = valor_fixo_cd_antt + valor_dificuldade_form
+                    st.warning("Distância calculada é 0 km. Cálculos de R$/km e Peso Transportado não aplicáveis.")
+                    custos_fixos_total = valor_fixo_cd_antt + valor_dificuldade_input
                     st.metric("Valor Total Estimado (Custos Fixos)", f"R$ {custos_fixos_total:.2f}")
-                else: 
-                    st.warning("Sem distância, não é possível calcular custos variáveis ou 'Frete Real'.")
-            elif not (data_obj_final is None): 
-                st.warning(f"Nenhuma tabela de frete ANTT para a data {data_final_str}.")
-            
+                else:
+                    st.warning("Sem distância calculada, não é possível detalhar custos variáveis ou o 'Frete Real'.")
+                    st.markdown(f"**Valor Fixo Carga/Descarga (ANTT):** R$ {valor_fixo_cd_antt:.2f}")
+                    st.markdown(f"**Adicional por Dificuldade (informado):** R$ {valor_dificuldade_input:.2f}")
+
+            elif not (data_obj is None):
+                st.warning(f"Nenhuma tabela de frete ANTT para a data {data_usuario_str}.")
+
             # --- Exibição do Mapa ---
             st.markdown("---")
             st.subheader("🗺️ Mapa da Rota Estimada")
-            map_df = st.session_state.map_data.get('points_df')
-            route_data_for_map = st.session_state.map_data.get('route_df')
+            map_df = st.session_state.map_data.get('points')
+            route_data = st.session_state.map_data.get('route')
 
             if map_df is not None and not map_df.empty:
-                center_lat = map_df['latitude'].mean()
-                center_lon = map_df['longitude'].mean()
-                initial_zoom = 3 if (distancia and distancia > 1000) else 5 if (distancia and distancia > 100) else 8
+                if len(map_df) >= 1:
+                    center_lat = map_df['latitude'].mean()
+                    center_lon = map_df['longitude'].mean()
+                    initial_zoom = 3 if len(map_df) == 2 and distancia and distancia > 500 else 10 if len(map_df)==1 else 5
+                else:
+                    center_lat = -15.788497
+                    center_lon = -47.879873
+                    initial_zoom = 3
 
-                layers_for_map = []
-                # Camada de Pontos
-                layers_for_map.append(pdk.Layer(
-                    'ScatterplotLayer', data=map_df, get_position='[longitude, latitude]',
-                    get_fill_color='cor', get_radius=20000, pickable=True,
+                layers_map = []
+                layers_map.append(pdk.Layer(
+                    'ScatterplotLayer',
+                    data=map_df,
+                    get_position='[longitude, latitude]',
+                    get_fill_color='cor',
+                    get_radius=25000 if PYDECK_AVAILABLE else 10000,
+                    pickable=True,
                     tooltip={"html": "<b>{tipo}</b><br/>Lat: {latitude}<br/>Lon: {longitude}"}
                 ))
-                # Camada da Rota
-                if PYDECK_AVAILABLE and pdk is not None and route_data_for_map:
-                    layers_for_map.append(pdk.Layer(
-                        "PathLayer", data=route_data_for_map, get_path="path", get_width=15, 
-                        get_color=[20, 100, 230, 180], width_min_pixels=2, pickable=True,
+
+                if PYDECK_AVAILABLE and pdk is not None and route_data:
+                    layers_map.append(pdk.Layer(
+                        "PathLayer",
+                        data=route_data,
+                        get_path="path",
+                        get_width=15,
+                        get_color=[0, 100, 255, 180],
+                        width_min_pixels=2,
+                        pickable=True,
                         tooltip={"html": "<b>{name}</b>"}
                     ))
-                
+
                 if PYDECK_AVAILABLE and pdk is not None:
                     try:
                         st.pydeck_chart(pdk.Deck(
-                            map_style='mapbox://styles/mapbox/outdoors-v11', # Estilo de mapa
+                            map_style='mapbox://styles/mapbox/light-v9',
                             initial_view_state=pdk.ViewState(
-                                latitude=center_lat, longitude=center_lon, 
-                                zoom=initial_zoom, pitch=45, bearing=0
+                                latitude=center_lat,
+                                longitude=center_lon,
+                                zoom=initial_zoom,
+                                pitch=45,
+                                bearing=0
                             ),
-                            layers=layers_for_map,
-                            tooltip=True # Tooltip padrão do Pydeck
+                            layers=layers_map,
+                            tooltip={"html": "<b>{tipo}</b><br/>Lat: {latitude}<br/>Lon: {longitude}",
+                                     "style": {"backgroundColor": "steelblue", "color": "white"}}
                         ))
                     except Exception as e_map:
-                        st.error(f"Erro ao gerar mapa Pydeck: {e_map}. Usando st.map.")
+                        st.error(f"Erro ao gerar mapa com Pydeck: {e_map}. Usando st.map como fallback se possível.")
                         if not map_df.empty: st.map(map_df, zoom=initial_zoom)
-                elif not map_df.empty: 
+
+                elif not map_df.empty :
                     st.map(map_df, zoom=initial_zoom)
             else:
-                st.caption("Coordenadas não disponíveis para o mapa.")
+                st.caption("Coordenadas não disponíveis para exibir o mapa.")
 
-            # Exibir logs do ORS
-            with st.expander("🔍 Ver Log de Processamento OpenRouteService", expanded=False):
+            with st.expander("🔎 Ver Log de Processamento OpenRouteService", expanded=False):
                 if st.session_state.ors_log:
                     for msg in st.session_state.ors_log:
-                        if "✔️" in msg: st.success(msg)
+                        if "✅" in msg: st.success(msg)
                         elif "⚠️" in msg: st.warning(msg)
                         elif "❌" in msg: st.error(msg)
                         else: st.text(msg)
                 else:
-                    st.caption("Nenhuma mensagem de log do ORS.")
+                    st.caption("Nenhuma mensagem de log do ORS gerada.")
+    elif not ORS_CLIENT_VALID:
+        st.error("Cálculo não pode prosseguir: Cliente OpenRouteService não inicializado.")
