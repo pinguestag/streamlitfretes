@@ -3,6 +3,10 @@ from datetime import datetime
 import openrouteservice
 from openrouteservice import exceptions as ors_exceptions
 import pandas as pd
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
 
 # Tenta importar Pydeck e define 'pdk'
 try:
@@ -13,7 +17,7 @@ except ImportError:
     pdk = None
 
 # ----- CONFIGURAÇÃO DO CLIENTE OPENROUTESERVICE -----
-ORS_API_KEY = st.secrets.get("ORS_API_KEY", None)
+ORS_API_KEY = os.getenv("ORS_API_KEY")
 ORS_CLIENT_VALID = False
 ors_client = None
 
@@ -168,7 +172,7 @@ if 'map_data' not in st.session_state:
     st.session_state.map_data = {'points': None, 'route': None}
 
 with st.form(key="input_form"):
-    st.markdown("##### 🗓️ Data e 🗺️ Localidades")
+    st.markdown("##### 📅 Data e 🗺️ Localidades")
     col_data, col_origem, col_destino = st.columns(3)
     with col_data:
         data_selecionada_dt = st.date_input("Data da requisição:", datetime.now(), help="Selecione a data para o cálculo.")
@@ -243,7 +247,7 @@ if submit_button:
                 coef_desloc_antt = frete_componentes[0]
                 valor_fixo_cd_antt = frete_componentes[1]
 
-                st.markdown("#### 📝 Componentes do Frete Base (ANTT)")
+                st.markdown("#### 📜 Componentes do Frete Base (ANTT)")
                 st.info(f"**Normativo Aplicável:** {normativo}")
                 f_col1, f_col2 = st.columns(2)
                 f_col1.metric("R$ / km (Base ANTT)", f"{coef_desloc_antt:.3f}")
@@ -253,16 +257,40 @@ if submit_button:
                     custo_deslocamento_antt = coef_desloc_antt * distancia
                     custo_adicional_desloc = adicional_deslocamento_taxa_input * distancia
 
-                    # CÁLCULO DO FRETE TOTAL ANTES DE CALCULAR O PESO TRANSPORTADO PARA TER A TARIFA CORRETA
-                    frete_total_calculado = (custo_deslocamento_antt + valor_fixo_cd_antt +
-                                             custo_adicional_desloc + valor_dificuldade_input)
+                    # CÁLCULO DO FRETE TOTAL "CHEIO" (custo para o caminhão completo)
+                    frete_total_cheio = (custo_deslocamento_antt + valor_fixo_cd_antt +
+                                         custo_adicional_desloc + valor_dificuldade_input)
+
+                    # --- LÓGICA PARA CALCULAR O VALOR TOTAL ESTIMADO COM BASE NO PESO DA MERCADORIA ---
+                    # IMPORTANTÍSSIMO: Ajuste este valor para a capacidade total do caminhão que você está usando como base!
+                    CAPACIDADE_TOTAL_CAMINHAO_KG = 20000.00 # Exemplo: 23520 kg (capacidade total)
+
+                    frete_total_calculado = frete_total_cheio # Valor padrão, se não houver proporção
+
+                    if peso_mercadoria_kg_input > 0 and CAPACIDADE_TOTAL_CAMINHAO_KG > 0:
+                        if peso_mercadoria_kg_input < CAPACIDADE_TOTAL_CAMINHAO_KG:
+                            proporcao_peso = peso_mercadoria_kg_input / CAPACIDADE_TOTAL_CAMINHAO_KG
+                            frete_total_calculado = frete_total_cheio * proporcao_peso
+                            st.info(f"**Nota:** Frete total ajustado proporcionalmente ao peso da mercadoria ({proporcao_peso*100:.2f}% da capacidade do caminhão), pois o peso é inferior à capacidade total.")
+                        else:
+                            # Se o peso da mercadoria é maior ou igual à capacidade, cobra-se o frete cheio.
+                            frete_total_calculado = frete_total_cheio
+                            st.info(f"**Nota:** Frete calculado para capacidade total, pois o peso da mercadoria ({peso_mercadoria_kg_input:.2f} kg) é igual ou superior à capacidade do caminhão ({CAPACIDADE_TOTAL_CAMINHAO_KG:.2f} kg).")
+                    elif peso_mercadoria_kg_input == 0:
+                         st.warning("Peso da mercadoria é 0. O frete estimado considera apenas custos fixos e adicionais não relacionados ao peso.")
+                         frete_total_calculado = valor_fixo_cd_antt + valor_dificuldade_input # Apenas custos fixos se não há peso
+                    else: # Caso CAPACIDADE_TOTAL_CAMINHAO_KG seja 0 ou não definido
+                        st.warning("Capacidade total do caminhão não definida ou é zero. O cálculo proporcional não pôde ser aplicado.")
+                        frete_total_calculado = frete_total_cheio
+                    # --- FIM DA LÓGICA DE PROPORÇÃO ---
+
 
                     # CORREÇÃO: Aplicando a sua fórmula exata para peso_transportado_calculado
                     # Certifique-se de que o 23520 e a unidade do peso_mercadoria_kg_input (KG)
                     # fazem sentido no contexto da sua fórmula.
                     # Se 'tarifa' é frete_total_calculado, então:
                     if peso_mercadoria_kg_input > 0 and distancia > 0: # Evita divisão por zero ou resultados sem sentido
-                        peso_transportado_calculado = (peso_mercadoria_kg_input * distancia * coef_desloc_antt) / 23520
+                        peso_transportado_calculado = peso_mercadoria_kg_input
                     else:
                         peso_transportado_calculado = 0.0 # Define como 0 se não houver peso ou distância
 
@@ -271,7 +299,7 @@ if submit_button:
                     percent_change = (delta_vs_base / coef_desloc_antt * 100) if coef_desloc_antt > 0 else 0
 
                     delta_color = "off"
-                    arrow = "▬"
+                    arrow = "―"
                     if delta_vs_base > 0.001:
                         delta_color = "normal"
                         arrow = "⬆️"
@@ -295,7 +323,7 @@ if submit_button:
                                       delta=f"{percent_change:.1f}% vs Base ANTT",
                                       delta_color=delta_color)
                     # CORREÇÃO: Exibindo o resultado da sua fórmula
-                    final_col3.metric(label="Peso Transportado Calculado (KG)",
+                    final_col3.metric(label="Peso Transportado (KG)",
                                       value=f"{peso_transportado_calculado:.2f} (KG)") # Adicionado o value
 
                 elif distancia == 0:
@@ -373,7 +401,7 @@ if submit_button:
             else:
                 st.caption("Coordenadas não disponíveis para exibir o mapa.")
 
-            with st.expander("🔎 Ver Log de Processamento OpenRouteService", expanded=False):
+            with st.expander("🔍 Ver Log de Processamento OpenRouteService", expanded=False):
                 if st.session_state.ors_log:
                     for msg in st.session_state.ors_log:
                         if "✅" in msg: st.success(msg)
