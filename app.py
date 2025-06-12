@@ -3,10 +3,8 @@ from datetime import datetime
 import openrouteservice
 from openrouteservice import exceptions as ors_exceptions
 import pandas as pd
-from dotenv import load_dotenv
 import os
 
-load_dotenv()
 
 # Tenta importar Pydeck e define 'pdk'
 try:
