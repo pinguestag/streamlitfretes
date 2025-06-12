@@ -17,7 +17,7 @@ except ImportError:
     pdk = None
 
 # ----- CONFIGURAÇÃO DO CLIENTE OPENROUTESERVICE -----
-ORS_API_KEY = os.getenv("ORS_API_KEY")
+ORS_API_KEY = os.secrets("ORS_API_KEY")
 ORS_CLIENT_VALID = False
 ors_client = None
 
